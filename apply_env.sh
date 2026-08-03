@@ -282,8 +282,9 @@ log_error "Application did not become healthy after the change."
 docker logs --tail 30 "${CONTAINER_NAME}" 2>&1 || true
 
 if [[ "${NO_ROLLBACK}" == true ]]; then
+  # Not "${0}": when run as bash -c "$(curl ...)" -- ... that expands to "--".
   log_warn "--no-rollback set; keeping the new .env. Restore it with:"
-  log_warn "  cp ${BACKUP} ${ENV_FILE} && ${0} --no-edit"
+  log_warn "  cp ${BACKUP} ${ENV_FILE} && apply_env.sh --no-edit --container ${CONTAINER_NAME}"
   exit 1
 fi
 
