@@ -1,1 +1,147 @@
+#!/usr/bin/env bash
 
+# wash247 -- single entry point for the carwash-smartgw device scripts.
+#
+#   wash247 install    ...  -> install_server.sh
+#   wash247 apply-env  ...  -> apply_env.sh
+#   wash247 uninstall  ...  -> uninstall_server.sh
+#
+# Every argument after the subcommand is passed through untouched, so anything
+# the underlying script accepts works here too.
+#
+# Each script is resolved in this order:
+#   1. next to this file
+#   2. $WASH247_HOME (default /opt/carwash-smartgw)
+#   3. downloaded from the public mirror
+# so this works both on a device with the scripts installed and on a bare host.
+
+set -euo pipefail
+
+MIRROR_BASE="${WASH247_MIRROR:-https://raw.githubusercontent.com/chargepoint-carwash/carwash-smartgw-install/main}"
+WASH247_HOME="${WASH247_HOME:-/opt/carwash-smartgw}"
+
+function log_error() {
+  local -r RED="\033[0;31m"
+  local -r NO_COLOR="\033[0m"
+  echo -e "${RED}[ERROR] $1${NO_COLOR}" >&2
+}
+
+function display_usage() {
+  cat <<EOF
+wash247 -- manage the carwash-smartgw gateway on this device
+
+Usage: wash247 <command> [options]
+
+Commands:
+  install      Install or re-install the gateway (install_server.sh)
+  apply-env    Change .env and apply it by recreating the container (apply_env.sh)
+  uninstall    Remove the gateway from this device (uninstall_server.sh)
+  help         Show this message
+
+All options after the command are passed through unchanged. For the options a
+command accepts, run:
+
+  wash247 install --help
+  wash247 apply-env --help
+  wash247 uninstall --help
+
+Examples:
+  sudo wash247 install --image zodinettech/carwash-smartgw:latest \\
+       --machine-id <ID> --machine-secret <SECRET> --serial-port /dev/ttyUSB0
+  sudo wash247 apply-env --set SERIAL_PORT=/dev/ttyS0
+  sudo wash247 apply-env
+  sudo wash247 uninstall --yes
+
+Environment:
+  WASH247_HOME    Where to look for the scripts (default: /opt/carwash-smartgw)
+  WASH247_MIRROR  Base URL used when a script is not present locally
+EOF
+}
+
+# Directory holding this script, following a symlink in /usr/local/bin.
+function self_dir() {
+  local src="${BASH_SOURCE[0]}"
+  while [[ -L "${src}" ]]; do
+    local dir
+    dir="$(cd -P "$(dirname "${src}")" && pwd)"
+    src="$(readlink "${src}")"
+    [[ "${src}" != /* ]] && src="${dir}/${src}"
+  done
+  cd -P "$(dirname "${src}")" && pwd
+}
+
+TMP_SCRIPT=""
+function cleanup() {
+  [[ -n "${TMP_SCRIPT}" && -f "${TMP_SCRIPT}" ]] && rm -f "${TMP_SCRIPT}"
+  return 0
+}
+trap cleanup EXIT
+
+# Prints a runnable path for the requested script.
+function resolve_script() {
+  local name="$1"
+  local candidate
+
+  candidate="$(self_dir)/${name}"
+  if [[ -f "${candidate}" ]]; then
+    printf '%s' "${candidate}"
+    return 0
+  fi
+
+  candidate="${WASH247_HOME}/${name}"
+  if [[ -f "${candidate}" ]]; then
+    printf '%s' "${candidate}"
+    return 0
+  fi
+
+  if ! command -v curl >/dev/null 2>&1; then
+    log_error "${name} not found locally and curl is unavailable to fetch it."
+    return 1
+  fi
+
+  TMP_SCRIPT="$(mktemp)"
+  if ! curl -fsSL "${MIRROR_BASE}/${name}" -o "${TMP_SCRIPT}"; then
+    log_error "${name} not found in $(self_dir) or ${WASH247_HOME},"
+    log_error "and downloading it from ${MIRROR_BASE}/${name} failed."
+    log_error "If the public mirror does not exist yet, copy the scripts to ${WASH247_HOME}."
+    return 1
+  fi
+
+  printf '%s' "${TMP_SCRIPT}"
+}
+
+if [[ $# -eq 0 ]]; then
+  display_usage
+  exit 1
+fi
+
+COMMAND="$1"
+shift
+
+case "${COMMAND}" in
+  install)
+    SCRIPT_NAME="install_server.sh"
+    ;;
+  apply-env | apply_env | env)
+    SCRIPT_NAME="apply_env.sh"
+    ;;
+  uninstall | remove)
+    SCRIPT_NAME="uninstall_server.sh"
+    ;;
+  help | --help | -h)
+    display_usage
+    exit 0
+    ;;
+  *)
+    log_error "Unknown command: ${COMMAND}"
+    echo ""
+    display_usage
+    exit 1
+    ;;
+esac
+
+SCRIPT_PATH="$(resolve_script "${SCRIPT_NAME}")"
+
+# bash <script> avoids depending on the executable bit, which is lost on a
+# freshly downloaded copy.
+bash "${SCRIPT_PATH}" "$@"
